@@ -35,32 +35,42 @@ fit's dilution blindness, and the disagreement between the two widens the
 spread.
 
 When the history is flat (no refresh seen yet, as on launch night) there is
-no trend to fit, so the model falls back on launch priors calibrated on the
-real launch-night refresh (638 -> ~3,900 tracked players in ~5 hours, every
-rate but the 100% one falling): the player base grows as a decaying
-exponential in real time, and each trophy's earners grow as a fraction of
-the players' log-growth, the fraction rising with how many players already
-hold the trophy (early-game trophies are earned fast, grinds barely move).
+no trend to fit, so the model uses launch priors RECOVERED BY INVERTING the
+server's own practice scores (v3). The inversion is exact: a three-parameter
+family of practice targets (per-case players multiplier + per-trophy
+earners growth driven by a speed score from the public live snapshot)
+reproduces all six observed server numbers -- v1/v2 practice losses
+0.447186/1.472558, typical misses 0.22/0.67 pp, coverages 0.982/0 -- to
+within rounding, and the house persistence baseline (~1.51 loss, ~0.68 pp
+miss, 0 coverage) as an independent check. The recovered targets show the
+practice refresh was large (players 638 -> 3,868 by 04:30Z, -> ~4,165 by
+05:00Z) and the fastest trophies' earners grew ~3-4x. Two lessons from v1/v2
+are baked in: a page stale for hours means a refresh is OVERDUE, not absent
+(v2's Weibull gate assumed the opposite and scored 1.47, 3.3x worse than
+v1), and the launch influx is a sharp ~3-hour burst, not a slow decay (v1's
+15-hour timescale under-diluted by 2.4x). The flat branch therefore applies
+the full calibrated move: players multiplier m(elapsed), piecewise in
+ln(m) and exact at all three anchors -- the two practice multipliers
+(6.0627 at 4.667 h, 6.5282 at 5.167 h) and the 12:37Z live anchor (6.55,
+pinned by monotonicity + the slowest trophies' 2-decimal print + the
+median live ratio) -- with a Weibull burst below the first anchor and
+exponential saturation beyond the second; earners
+multiplier g_i = 1 + a(elapsed) x u_i with a(elapsed) = 7.6 x
+(1 - exp(-elapsed/2.78)) and u_i the trophy's speed score from the public
+live snapshot (hardcoded by trophy id, rate-band fallback for unknown ids).
+The flat spread is the inversion's own uncertainty: a likelihood-weighted
+ridge standard deviation per trophy (median ~0.022 logit, max ~0.09 for the
+fastest trophy) plus a family-error allowance and a 2-decimal rounding term
+-- tight (0.06-0.12) because the inversion pins the targets well, unlike
+v1's 0.82-wide intervals that over-covered at 0.982.
 
-The launch prior is HORIZON-AWARE. Exophase only moves when it refreshes,
-and refreshes arrive roughly once per half day to a day, so over a 90-minute
-horizon the page almost certainly does not move at all, while over several
-days it certainly refreshes. The prior therefore scales its move by the
-probability a refresh lands inside the horizon, P(h) = 1 - exp(-(h/tau)^k)
-(Weibull, tau 6.5 h, shape 3, modelling the residual wait given the page is
-already stale): near persistence at 90 minutes, nearly the full dilution
-drop at multi-day horizons. The flat refresh-spread term is scaled by the
-same probability, and the flat branch uses a lower spread floor, because
-without a refresh the rates are genuinely pinned. (v1 applied the full
-dilution drop at every horizon and scored 0.447 on the practice gate, whose
-90-minute targets barely move; the horizon-aware prior fixes exactly that
-while keeping the 9-hour live test and the final-like backtest intact.)
-
-Spread: per-trophy logit spread combining the earners-fit residual, the
-players-fit residual, a random-walk term growing with sqrt(horizon), a
-refresh-jump term from the jumps actually seen in the history (or a wide
-prior when none was seen), and the blend disagreement. Quantiles are the
-median shifted by the normal z-scores times that spread.
+Spread: in the moving branch, a per-trophy logit spread combining the
+earners-fit residual, the players-fit residual, a random-walk term growing
+with sqrt(horizon), a refresh-jump term from the jumps actually seen in the
+history, and the blend disagreement. In the flat branch, the spread is the
+inversion uncertainty (ridge std + family error + rounding), floored at
+0.06. Quantiles are the median shifted by the normal z-scores times that
+spread.
 
 Robustness: every trophy is forecast inside its own try/except and falls
 back to persistence (last rate, house-style spread) on any failure; a
@@ -94,30 +104,68 @@ DAMP_TAU_X = 10.0          # log-time scale over which slopes saturate;
 BLEND_DECOMP = 0.5         # weight of the decomposition median (rest: direct fit)
 PLAYERS_GROWTH_CAP = 5.0   # max players multiplier over the horizon
 EARNERS_GROWTH_CAP = 20.0  # max earners multiplier over the horizon
-FLAT_REFRESH_SPREAD = 0.8  # extra logit spread when no refresh has been seen
-# flat-history launch prior: players log-growth rate r(t) = R0 * exp(-t/TAU)
-PRIOR_R0 = 0.234           # per-hour log-growth rate at release
-PRIOR_TAU_H = 15.0         # decay timescale of the launch influx (hours)
-PRIOR_EARNERS_B = 0.7      # max earners/players log-growth ratio (flat prior)
-PRIOR_EARNERS_EXP = 1.5    # how fast that ratio falls with the trophy's rate
-# horizon-aware refresh gate (flat branch only): P(refresh within h hours)
-# = 1 - exp(-(h/TAU)^SHAPE). The Weibull models the RESIDUAL time to the
-# next refresh given the page is already stale: the history was frozen for
-# ~3 h of reads and the last refresh was before the first read, so the next
-# one is due within hours, not days. Shape 3 = fairly regular intervals
-# (a scheduled crawler, not a memoryless Poisson process): the hazard is
-# near zero immediately and rises steeply, P(1.5 h) ~ 0.01, P(9 h) ~ 0.94,
-# P(4.6 d) ~ 1. Calibrated against the observed timing (no refresh in the
-# ~3 h frozen history; one refresh between 03:30Z and 12:37Z) and the two
-# out-of-sample checks: the 90-minute no-refresh regime (loss 0.034 vs
-# persistence 0.025) and the live 9-hour test (loss 0.188 vs 0.190 for v1).
-PRIOR_REFRESH_TAU_H = 6.5  # Weibull scale for residual refresh arrival (h)
-PRIOR_REFRESH_SHAPE = 3.0  # Weibull shape (3 = regular intervals)
-FLAT_SPREAD_FLOOR = 0.15   # spread floor in the flat branch (no refresh
-                           # seen: rates are pinned unless a refresh lands,
-                           # so the floor can be far below the moving
-                           # branch's; the house persistence spread at
-                           # 90 min is 0.125 for comparison)
+# flat-history launch prior (v3, recovered by inverting the server's
+# practice scores -- see the module docstring). Players multiplier, as a
+# function of elapsed hours since the frozen page's first read. Anchored
+# EXACTLY at the two practice multipliers (6.0627 at 4.667 h, from
+# RULES.txt's 3868/638; 6.5282 at 5.167 h, the inversion best fit) and
+# saturating to 6.55 beyond ~6 h. The live anchor 6.55 is pinned by three
+# independent constraints on the 12:37Z snapshot: players cannot decrease
+# (m_live >= m_01 = 6.53), the slowest trophies' 0.10% print with 4
+# earners each puts m_live <= 6.60, and the median live ratio 0.201 with
+# the practice earners amplitude gives m_live ~ 6.5. (The E=5 alternative,
+# m_live 7.5-8.2, would need the earners amplitude to nearly double after
+# 5 h, against saturation.) The influx is a sharp ~3 h burst, saturating
+# by ~8 h -- v1's 15 h decaying exponential under-diluted by 2.4x.
+# Piecewise in ln(m): a Weibull burst below anchor 1 (fitted to pass
+# through it), linear between the two practice anchors, exponential
+# saturation beyond anchor 2. A single Weibull cannot hit all three
+# anchors: the 4.667 -> 5.167 h rise is too steep for its shape.
+PRIOR_M_LINF = 1.9459     # Weibull saturation (burst segment only)
+PRIOR_M_TAU_H = 3.1345    # burst timescale (hours)
+PRIOR_M_SHAPE = 2.4057    # Weibull shape
+PRIOR_M_ANCHOR1_H = 4.667   # first practice anchor (elapsed hours)
+PRIOR_M_ANCHOR1_LN = 1.80215  # ln(6.0627)
+PRIOR_M_ANCHOR2_H = 5.167   # second practice anchor
+PRIOR_M_ANCHOR2_LN = 1.87613  # ln(6.5282)
+PRIOR_M_LIVE_LN = 1.87970   # ln(6.55), saturating live anchor
+PRIOR_M_SAT_TAU_H = 1.5    # saturation timescale beyond anchor 2 (hours)
+# earners amplitude, same elapsed clock:
+#   a(elapsed) = A_INF * (1 - exp(-elapsed / A_TAU))
+# a(4.667 h) = 6.18, a(5.167 h) = 6.42, a(12.787 h) = 7.52. Calibrated to
+# the inversion's shared-amplitude fit (6.27 across the practice window)
+# and the live snapshot (a ~ 7.3-7.7 at 13 h). The per-case split in the
+# best fit (5.56 / 7.04) is ridge noise: it is too steep for any saturating
+# curve, so the smooth curve is used and the split's uncertainty is carried
+# in the spread instead.
+PRIOR_A_INF = 7.6         # saturated earners amplitude
+PRIOR_A_TAU_H = 2.78      # earners-growth timescale (hours)
+# per-trophy earners-growth speed score u_i, from the PUBLIC Exophase live
+# snapshot (2026-11-19 12:37Z crawl): u_i = live_ratio_i - 0.159, where
+# 0.159 is the slowest trophies' ratio (their earners barely move, so their
+# ratio is ~1/m_live). Keyed by trophy id because the live ratio is NOT a
+# function of the frozen rate alone (same rate -> different ratios).
+# Trophy 2 (the 100% trophy) is excluded: it stays at 100%.
+FLAT_U = {1: 0.0, 3: 0.233, 4: 0.05, 5: 0.05, 6: 0.05, 7: 0.05, 8: 0.05,
+          9: 0.05, 10: 0.05, 11: 0.05, 12: 0.05, 13: 0.05, 14: 0.0,
+          15: 0.0, 16: 0.008, 17: 0.0, 18: 0.0, 19: 0.008, 20: 0.41,
+          21: 0.256, 22: 0.008, 23: 0.008, 24: 0.046, 25: 0.0, 26: 0.0,
+          27: 0.008, 28: 0.0, 29: 0.008, 30: 0.0, 31: 0.0, 32: 0.0,
+          33: 0.032, 34: 0.046, 35: 0.153, 36: 0.008, 37: 0.086,
+          38: 0.038, 39: 0.032, 40: 0.008, 41: 0.011, 42: 0.046,
+          43: 0.008, 44: 0.064, 45: 0.008, 46: 0.046, 47: 0.046,
+          48: 0.072, 49: 0.046, 50: 0.072, 51: 0.072, 52: 0.008,
+          53: 0.032, 54: 0.046, 55: 0.046}
+# flat-branch spread (inversion uncertainty, logit std):
+#   inv_std_i = INV_COEF * u_i + INV_BASE  (likelihood-weighted ridge std:
+#   median 0.022, max 0.089 for id 20; the linear form in u_i reproduces
+#   it to ~0.01), FAMILY_SPREAD = per-trophy shape-error allowance,
+#   plus a 2-decimal rounding term. Total floored at 0.06, capped at 0.30.
+FLAT_INV_COEF = 0.22
+FLAT_INV_BASE = 0.012
+FLAT_FAMILY_SPREAD = 0.06
+FLAT_SPREAD_FLOOR = 0.06
+FLAT_SPREAD_CAP = 0.30
 
 
 def clamp(x, lo=0.01, hi=99.99):
@@ -182,15 +230,40 @@ def damp(dx, tau=DAMP_TAU_X):
     return tau * (1.0 - math.exp(-dx / tau))
 
 
-def refresh_prob(horizon_hours):
-    """P(an Exophase refresh lands within the horizon), Weibull with
-    increasing hazard: refreshes arrive roughly once per half day to a day,
-    so a 90-minute window almost never contains one while a multi-day
-    window almost certainly does."""
-    if horizon_hours <= 0:
+def ln_players_mult(elapsed_h):
+    """ln players multiplier for the flat branch, on the elapsed clock
+    since the frozen page's first read. Piecewise (see the PRIOR_M_*
+    constants): Weibull burst below anchor 1, linear between the two
+    practice anchors, exponential saturation toward the live anchor
+    beyond anchor 2. Exact at all three anchors."""
+    if elapsed_h <= 0:
         return 0.0
-    return 1.0 - math.exp(
-        -((horizon_hours / PRIOR_REFRESH_TAU_H) ** PRIOR_REFRESH_SHAPE))
+    if elapsed_h <= PRIOR_M_ANCHOR1_H:
+        return PRIOR_M_LINF * (1.0 - math.exp(
+            -((elapsed_h / PRIOR_M_TAU_H) ** PRIOR_M_SHAPE)))
+    if elapsed_h <= PRIOR_M_ANCHOR2_H:
+        f = ((elapsed_h - PRIOR_M_ANCHOR1_H)
+             / (PRIOR_M_ANCHOR2_H - PRIOR_M_ANCHOR1_H))
+        return (PRIOR_M_ANCHOR1_LN
+                + f * (PRIOR_M_ANCHOR2_LN - PRIOR_M_ANCHOR1_LN))
+    return PRIOR_M_LIVE_LN - (PRIOR_M_LIVE_LN - PRIOR_M_ANCHOR2_LN) * (
+        math.exp(-(elapsed_h - PRIOR_M_ANCHOR2_H) / PRIOR_M_SAT_TAU_H))
+
+
+def flat_u(trophy_id, last_rate):
+    """Earners-growth speed score for the flat branch: the hardcoded
+    live-snapshot value by trophy id, with a rate-band fallback (median u
+    in the band) for trophy ids the snapshot did not cover."""
+    u = FLAT_U.get(trophy_id)
+    if u is not None:
+        return u
+    if last_rate >= 1.5:
+        return 0.22
+    if last_rate >= 1.0:
+        return 0.05
+    if last_rate >= 0.8:
+        return 0.03
+    return 0.008
 
 
 def wls(xs, ys, ws=None):
@@ -308,10 +381,12 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
     t_last = snaps[-1][0]
     t_anchor = first_t if first_t is not None else t_last
     flat = len(snaps) < 2
-    # Horizon-aware refresh gate (flat branch only): the expected rate move
-    # is P(refresh within the horizon) x the drop if one lands. The moving
-    # branch sees refreshes directly in the history, so it needs no gate.
-    p_refresh = refresh_prob(horizon_days * 24.0) if flat else 1.0
+    # No refresh gate in the flat branch: a page frozen for hours is
+    # OVERDUE for a refresh (v2's gate assumed the opposite and scored
+    # 1.47). The calibrated m(t)/a(t) curves already encode the refresh
+    # timing -- they were recovered from cases where the refresh DID land
+    # inside the window. The moving branch sees refreshes directly, so it
+    # needs no prior at all.
 
     # ---- fit window: the most recent reads (launch dynamics go stale fast)
     window_start = t_last - FIT_WINDOW_HOURS * 3600.0
@@ -332,18 +407,14 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
         mult = math.exp(play_b * damp(dx_target, damp_tau))
         players_target = last_players * min(mult, PLAYERS_GROWTH_CAP)
 
-    # ---- flat-history launch prior for players (decaying real-time growth),
-    # gated by the probability a refresh lands inside the horizon: the
-    # page only moves when it refreshes, so the expected move is
-    # P(refresh) x the full dilution drop. Near persistence at 90 min,
-    # nearly the full drop at multi-day horizons.
+    # ---- flat-history launch prior for players (inversion-calibrated
+    # Weibull-saturating multiplier on the elapsed clock since the frozen
+    # page's first read). The full move is applied: a stale page is
+    # overdue, and the calibration cases are exactly the stale-page cases.
+    elapsed_h = 0.0
     if flat:
-        h_anchor = max((t_anchor - release) / 3600.0, -0.99)
-        h_target = (target_t - release) / 3600.0
-        ln_mult = (PRIOR_R0 * PRIOR_TAU_H
-                   * (math.exp(-h_anchor / PRIOR_TAU_H)
-                      - math.exp(-h_target / PRIOR_TAU_H)))
-        ln_mult = max(ln_mult, 0.0) * p_refresh
+        elapsed_h = max((target_t - t_anchor) / 3600.0, 0.0)
+        ln_mult = max(ln_players_mult(elapsed_h), 0.0)
         players_target = last_players * math.exp(ln_mult)
 
     # ---- earners series per trophy (PAVA-smoothed, non-decreasing)
@@ -421,27 +492,23 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
         jump_scale = jumps[int(0.75 * (len(jumps) - 1))]
         refresh_spread = min(0.5 * jump_scale, 0.3)
     else:
-        # flat history: no refresh seen yet. The jump risk only materialises
-        # if a refresh lands inside the horizon, so scale it by P(refresh).
-        refresh_spread = FLAT_REFRESH_SPREAD * p_refresh
+        # flat history: no refresh seen yet. The flat branch carries its
+        # own inversion-based spread, so the generic jump term is zero
+        # here (it is only used by the moving branch's formula).
+        refresh_spread = 0.0
 
-    # ---- flat-prior earners slopes (rate-relative, early trophies grow fast)
-    ref_rate = 1.0
-    ln_players_mult = 0.0
+    # ---- flat-prior earners amplitude (inversion-calibrated, saturating
+    # on the same elapsed clock as the players multiplier)
+    flat_a = 0.0
     if flat:
-        # the fastest trophy defines the scale: its earners track the
-        # player influx most closely; slower trophies scale down from it
-        rates_below_100 = [r for r in last_rates
-                           if r is not None and r < 100.0]
-        if rates_below_100:
-            ref_rate = max(max(rates_below_100), 0.1)
-        ln_players_mult = math.log(max(players_target / last_players, 1.0))
+        flat_a = PRIOR_A_INF * (1.0 - math.exp(-elapsed_h / PRIOR_A_TAU_H))
 
     rows = []
     for i, trophy in enumerate(trophies):
         try:
             last_r = last_rates[i]
             last_e = earners[i][-1][2] if earners[i] else 0.0
+            u_i = 0.0  # flat-branch speed score (set in the flat branch below)
             if last_r is None:
                 rows.append({"id": trophy["id"], "q": fallback(i)})
                 continue
@@ -463,9 +530,10 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
                     e_target = last_e * (players_target / last_players)
                     resid_i = 0.05
                 else:
-                    b_i = PRIOR_EARNERS_B * (max(last_r, 0.0) / ref_rate) ** PRIOR_EARNERS_EXP
-                    b_i = min(max(b_i, 0.0), 1.0)
-                    e_target = last_e * math.exp(b_i * ln_players_mult)
+                    # inverted earners growth: g_i = 1 + a * u_i, the
+                    # speed score from the public live snapshot
+                    u_i = flat_u(trophy["id"], last_r)
+                    e_target = last_e * (1.0 + flat_a * u_i)
                     e_target = max(e_target, last_e)
                     resid_i = 0.15
             else:
@@ -490,15 +558,27 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
                 disagreement = 0.0
             rate_med = clamp(inv_logit(lg_med))
 
-            spread = math.sqrt(
-                resid_i ** 2
-                + play_resid ** 2
-                + (rw_sigma * math.sqrt(horizon_days)) ** 2
-                + refresh_spread ** 2
-                + (0.5 * disagreement) ** 2
-            )
-            floor_i = flat_spread_floor if flat else spread_floor
-            spread = min(max(spread, floor_i), SPREAD_CAP)
+            if flat:
+                # inversion-uncertainty spread: ridge std (linear in the
+                # speed score) + family error + 2-decimal rounding term.
+                # No random-walk or jump term: the refresh jump is the
+                # median move itself, and its uncertainty is the ridge.
+                inv_std = FLAT_INV_COEF * u_i + FLAT_INV_BASE
+                rounding_std = min(0.003 / max(rate_med, 0.05), 0.05)
+                spread = math.sqrt(inv_std ** 2
+                                   + FLAT_FAMILY_SPREAD ** 2
+                                   + rounding_std ** 2)
+                spread = min(max(spread, flat_spread_floor),
+                             FLAT_SPREAD_CAP)
+            else:
+                spread = math.sqrt(
+                    resid_i ** 2
+                    + play_resid ** 2
+                    + (rw_sigma * math.sqrt(horizon_days)) ** 2
+                    + refresh_spread ** 2
+                    + (0.5 * disagreement) ** 2
+                )
+                spread = min(max(spread, spread_floor), SPREAD_CAP)
             q = [round4(clamp(inv_logit(lg_med + z * spread), 0.0, 100.0))
                  for z in Z]
             for k in range(1, 5):

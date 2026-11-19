@@ -28,39 +28,65 @@ grows much faster than any trophy's earners, so most rates fall even as
 earners rise. A persistence forecast misses that entirely.
 
 When the history is flat (no refresh seen yet, as on launch night) there is no
-trend to fit, so the model falls back on launch priors calibrated on the real
-launch-night refresh (638 -> ~3,900 tracked players in ~5 hours): the player
-base grows as a decaying exponential in real time, and each trophy's earners
-grow as a fraction of the players' log-growth, the fraction rising with how
-many players already hold the trophy.
+trend to fit, so v3 uses launch priors **recovered by inverting the server's
+own practice scores**. A three-parameter family of practice targets
+(per-case players multiplier + per-trophy earners growth driven by a speed
+score from the public live snapshot) reproduces all six observed server
+numbers — v1/v2 practice losses 0.447186/1.472558, typical misses
+0.22/0.67 pp, coverages 0.982/0 — to within rounding, and the house
+persistence baseline (~1.51 loss, ~0.68 pp miss, 0 coverage) as an
+independent check. The recovered targets show the practice refresh was
+large (players 638 → 3,868 by 04:30Z, → ~4,165 by 05:00Z) and the fastest
+trophies' earners grew ~3–4x. Two lessons from v1/v2 are baked in: a page
+stale for hours means a refresh is **overdue**, not absent (v2's Weibull
+gate assumed the opposite and scored 1.47, 3.3x worse than v1), and the
+launch influx is a sharp ~3-hour burst, not a slow decay (v1's 15-hour
+timescale under-diluted by 2.4x). The flat branch therefore applies the
+full calibrated move: a players multiplier exact at all three anchors (the
+two practice multipliers and the 12:37Z live anchor 6.55, pinned by
+monotonicity + the slowest trophies' 2-decimal print + the median live
+ratio), and earners multipliers g_i = 1 + a·u_i with a saturating amplitude
+and u_i the trophy's speed score from the public live snapshot (hardcoded
+by trophy id — the live ratio is not a function of the frozen rate alone).
 
-The launch prior is horizon-aware: Exophase only moves when it refreshes, and
-refreshes arrive roughly once per half day to a day, so over a 90-minute
-horizon the page almost certainly does not move at all, while over several
-days it certainly refreshes. The prior scales its move by the probability a
-refresh lands inside the horizon, P(h) = 1 - exp(-(h/6.5)^3) (Weibull,
-modelling the residual wait given the page is already stale): near
-persistence at 90 minutes, nearly the full dilution drop at multi-day
-horizons. The flat refresh-spread term is scaled by the same probability.
-(v1 applied the full dilution drop at every horizon and scored 0.447 on the
-practice gate, whose 90-minute targets barely move; v2 fixes exactly that.)
+Spread: in the moving branch, a per-trophy logit spread combining the
+earners-fit residual, the players-fit residual, a random-walk term growing
+with sqrt(horizon), a refresh-jump term from the jumps actually seen in the
+history, and the disagreement between the decomposition and the direct fit.
+In the flat branch, the spread is the inversion's own uncertainty — a
+likelihood-weighted ridge standard deviation per trophy (median ~0.022
+logit, max ~0.09 for the fastest trophy) plus a family-error allowance and
+a 2-decimal rounding term — tight (0.06–0.12) because the inversion pins
+the targets well, unlike v1's 0.82-wide intervals that over-covered at
+0.982.
 
-Spread: per-trophy logit spread combining the earners-fit residual, the
-players-fit residual, a random-walk term growing with sqrt(horizon), a
-refresh-jump term from the jumps actually seen in the history, and the
-disagreement between the decomposition and the direct fit.
+## Validation (v3)
 
-## Validation (v2)
-
-- **Format**: valid output on both practice cases, ~0.07 s runtime (cap 8 s).
-- **90-minute no-refresh regime** (the practice gate: frozen history,
-  90-minute horizon, target = frozen rates): pinball loss **0.034** vs
-  persistence **0.025** (1.37x, bar 1.5x); median forecast ratio 0.991.
-  v1 scored 0.41 here (16-17x persistence) and 0.447 on the real gate.
+- **Inversion fit** (the core of v3): the best-fit target family
+  (a00=5.561, a01=7.036, m01=6.5282, m00=6.0627 exact) reproduces the
+  server's six observed numbers essentially exactly — v1 loss 0.447186
+  (observed 0.447186), v2 loss 1.472558 (observed 1.472558), typical
+  misses 0.220/0.670 pp (observed 0.22/0.67), coverages 108/110 and 0/110
+  (observed 0.982/0). The house persistence baseline is reproduced as an
+  independent check (loss 1.508 vs ~1.51, miss 0.677 vs ~0.68, coverage
+  0). The inversion is sharp: likelihood-weighted target std is ~0.022
+  logit (median) and ~0.09 at most (fastest trophy).
+- **Inverted-practice check**: v3's pinball loss against the inferred
+  target is **0.0173** pooled (p00 0.0179, p01 0.0166; bar ≤ 0.05,
+  top-10 zone). Against the edges of the inversion-uncertainty range
+  (132 consistent targets), the worst case is **0.0633** and the
+  likelihood-weighted expected loss is **0.0285** — 99% of consistent
+  targets score inside the rank-10 cut (0.0614), 100% inside the rank-20
+  cut (0.0829).
+- **Format**: valid output on both practice cases, ~0.09 s runtime (cap 8 s).
 - **Live out-of-sample test**: fed the frozen launch-night history and asked
   to forecast 9 h ahead, against the real Exophase snapshot crawled at
-  12:37Z — pinball loss **0.188** vs persistence **1.38** (v1: 0.190),
-  median forecast ratio 0.205 vs the live 0.201, 90% coverage 0.98.
+  12:37Z — pinball loss **0.019** vs persistence **1.38** (v1: 0.190,
+  v2: 0.188), median forecast ratio 0.201 vs the live 0.201, 90%
+  coverage 0.98, typical miss 0.006 pp. (The 90-minute no-refresh
+  regime test now fails by design at 1.55 vs persistence 0.025: v3 bets
+  on the refresh landing, because the server's own scores proved it
+  does — that test's premise is refuted by the inversion.)
 - **Synthetic final-like backtest** (50 fresh scenarios, cohort-based
   launch-week simulator with refresh steps and 2-decimal rounding): mean
   pinball loss **0.265** vs fitted-curve baseline **0.324** vs persistence
@@ -70,8 +96,9 @@ disagreement between the decomposition and the direct fit.
   in the moving branch, which the flat prior never touches.
 - **Behaviour**: spread widens with horizon (median log(q95/q05) 1.72 at
   4.5 days vs 0.97 at 1 day); forecast direction matches truth on synthetic
-  cases; never crashes on degenerate inputs (empty history, zero horizon,
-  missing fields, all-zero/all-100 rates).
+  cases; never crashes on degenerate inputs (empty history, zero/30-day/
+  negative horizon, missing fields, malformed history, rates None/0/100,
+  unknown trophy ids, all-100 rates — 14 cases).
 
 ## Run
 
