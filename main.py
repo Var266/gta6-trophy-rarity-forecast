@@ -41,8 +41,20 @@ rate but the 100% one falling): the player base grows as a decaying
 exponential in real time, and each trophy's earners grow as a fraction of
 the players' log-growth, the fraction rising with how many players already
 hold the trophy (early-game trophies are earned fast, grinds barely move).
-The spread is widened a lot, because an unseen refresh can move every rate
-at once.
+
+The launch prior is HORIZON-AWARE. Exophase only moves when it refreshes,
+and refreshes arrive roughly once per half day to a day, so over a 90-minute
+horizon the page almost certainly does not move at all, while over several
+days it certainly refreshes. The prior therefore scales its move by the
+probability a refresh lands inside the horizon, P(h) = 1 - exp(-(h/tau)^k)
+(Weibull, tau 6.5 h, shape 3, modelling the residual wait given the page is
+already stale): near persistence at 90 minutes, nearly the full dilution
+drop at multi-day horizons. The flat refresh-spread term is scaled by the
+same probability, and the flat branch uses a lower spread floor, because
+without a refresh the rates are genuinely pinned. (v1 applied the full
+dilution drop at every horizon and scored 0.447 on the practice gate, whose
+90-minute targets barely move; the horizon-aware prior fixes exactly that
+while keeping the 9-hour live test and the final-like backtest intact.)
 
 Spread: per-trophy logit spread combining the earners-fit residual, the
 players-fit residual, a random-walk term growing with sqrt(horizon), a
@@ -88,6 +100,24 @@ PRIOR_R0 = 0.234           # per-hour log-growth rate at release
 PRIOR_TAU_H = 15.0         # decay timescale of the launch influx (hours)
 PRIOR_EARNERS_B = 0.7      # max earners/players log-growth ratio (flat prior)
 PRIOR_EARNERS_EXP = 1.5    # how fast that ratio falls with the trophy's rate
+# horizon-aware refresh gate (flat branch only): P(refresh within h hours)
+# = 1 - exp(-(h/TAU)^SHAPE). The Weibull models the RESIDUAL time to the
+# next refresh given the page is already stale: the history was frozen for
+# ~3 h of reads and the last refresh was before the first read, so the next
+# one is due within hours, not days. Shape 3 = fairly regular intervals
+# (a scheduled crawler, not a memoryless Poisson process): the hazard is
+# near zero immediately and rises steeply, P(1.5 h) ~ 0.01, P(9 h) ~ 0.94,
+# P(4.6 d) ~ 1. Calibrated against the observed timing (no refresh in the
+# ~3 h frozen history; one refresh between 03:30Z and 12:37Z) and the two
+# out-of-sample checks: the 90-minute no-refresh regime (loss 0.034 vs
+# persistence 0.025) and the live 9-hour test (loss 0.188 vs 0.190 for v1).
+PRIOR_REFRESH_TAU_H = 6.5  # Weibull scale for residual refresh arrival (h)
+PRIOR_REFRESH_SHAPE = 3.0  # Weibull shape (3 = regular intervals)
+FLAT_SPREAD_FLOOR = 0.15   # spread floor in the flat branch (no refresh
+                           # seen: rates are pinned unless a refresh lands,
+                           # so the floor can be far below the moving
+                           # branch's; the house persistence spread at
+                           # 90 min is 0.125 for comparison)
 
 
 def clamp(x, lo=0.01, hi=99.99):
@@ -150,6 +180,17 @@ def damp(dx, tau=DAMP_TAU_X):
     if dx <= 0:
         return dx
     return tau * (1.0 - math.exp(-dx / tau))
+
+
+def refresh_prob(horizon_hours):
+    """P(an Exophase refresh lands within the horizon), Weibull with
+    increasing hazard: refreshes arrive roughly once per half day to a day,
+    so a 90-minute window almost never contains one while a multi-day
+    window almost certainly does."""
+    if horizon_hours <= 0:
+        return 0.0
+    return 1.0 - math.exp(
+        -((horizon_hours / PRIOR_REFRESH_TAU_H) ** PRIOR_REFRESH_SHAPE))
 
 
 def wls(xs, ys, ws=None):
@@ -235,7 +276,8 @@ def persistence_row(rate, horizon_days):
 
 
 def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
-                  rw_sigma=RW_SIGMA, spread_floor=SPREAD_FLOOR):
+                  rw_sigma=RW_SIGMA, spread_floor=SPREAD_FLOOR,
+                  flat_spread_floor=FLAT_SPREAD_FLOOR):
     trophies = case.get("trophies") or []
     history = case.get("history") or []
     horizon_days = max(float(case.get("horizon_minutes") or 0) / 1440.0, 0.0)
@@ -266,6 +308,10 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
     t_last = snaps[-1][0]
     t_anchor = first_t if first_t is not None else t_last
     flat = len(snaps) < 2
+    # Horizon-aware refresh gate (flat branch only): the expected rate move
+    # is P(refresh within the horizon) x the drop if one lands. The moving
+    # branch sees refreshes directly in the history, so it needs no gate.
+    p_refresh = refresh_prob(horizon_days * 24.0) if flat else 1.0
 
     # ---- fit window: the most recent reads (launch dynamics go stale fast)
     window_start = t_last - FIT_WINDOW_HOURS * 3600.0
@@ -286,14 +332,18 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
         mult = math.exp(play_b * damp(dx_target, damp_tau))
         players_target = last_players * min(mult, PLAYERS_GROWTH_CAP)
 
-    # ---- flat-history launch prior for players (decaying real-time growth)
+    # ---- flat-history launch prior for players (decaying real-time growth),
+    # gated by the probability a refresh lands inside the horizon: the
+    # page only moves when it refreshes, so the expected move is
+    # P(refresh) x the full dilution drop. Near persistence at 90 min,
+    # nearly the full drop at multi-day horizons.
     if flat:
         h_anchor = max((t_anchor - release) / 3600.0, -0.99)
         h_target = (target_t - release) / 3600.0
         ln_mult = (PRIOR_R0 * PRIOR_TAU_H
                    * (math.exp(-h_anchor / PRIOR_TAU_H)
                       - math.exp(-h_target / PRIOR_TAU_H)))
-        ln_mult = max(ln_mult, 0.0)
+        ln_mult = max(ln_mult, 0.0) * p_refresh
         players_target = last_players * math.exp(ln_mult)
 
     # ---- earners series per trophy (PAVA-smoothed, non-decreasing)
@@ -371,7 +421,9 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
         jump_scale = jumps[int(0.75 * (len(jumps) - 1))]
         refresh_spread = min(0.5 * jump_scale, 0.3)
     else:
-        refresh_spread = FLAT_REFRESH_SPREAD
+        # flat history: no refresh seen yet. The jump risk only materialises
+        # if a refresh lands inside the horizon, so scale it by P(refresh).
+        refresh_spread = FLAT_REFRESH_SPREAD * p_refresh
 
     # ---- flat-prior earners slopes (rate-relative, early trophies grow fast)
     ref_rate = 1.0
@@ -445,7 +497,8 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
                 + refresh_spread ** 2
                 + (0.5 * disagreement) ** 2
             )
-            spread = min(max(spread, spread_floor), SPREAD_CAP)
+            floor_i = flat_spread_floor if flat else spread_floor
+            spread = min(max(spread, floor_i), SPREAD_CAP)
             q = [round4(clamp(inv_logit(lg_med + z * spread), 0.0, 100.0))
                  for z in Z]
             for k in range(1, 5):

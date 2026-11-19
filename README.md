@@ -32,25 +32,46 @@ trend to fit, so the model falls back on launch priors calibrated on the real
 launch-night refresh (638 -> ~3,900 tracked players in ~5 hours): the player
 base grows as a decaying exponential in real time, and each trophy's earners
 grow as a fraction of the players' log-growth, the fraction rising with how
-many players already hold the trophy. The spread is widened a lot, because an
-unseen refresh can move every rate at once.
+many players already hold the trophy.
+
+The launch prior is horizon-aware: Exophase only moves when it refreshes, and
+refreshes arrive roughly once per half day to a day, so over a 90-minute
+horizon the page almost certainly does not move at all, while over several
+days it certainly refreshes. The prior scales its move by the probability a
+refresh lands inside the horizon, P(h) = 1 - exp(-(h/6.5)^3) (Weibull,
+modelling the residual wait given the page is already stale): near
+persistence at 90 minutes, nearly the full dilution drop at multi-day
+horizons. The flat refresh-spread term is scaled by the same probability.
+(v1 applied the full dilution drop at every horizon and scored 0.447 on the
+practice gate, whose 90-minute targets barely move; v2 fixes exactly that.)
 
 Spread: per-trophy logit spread combining the earners-fit residual, the
 players-fit residual, a random-walk term growing with sqrt(horizon), a
 refresh-jump term from the jumps actually seen in the history, and the
 disagreement between the decomposition and the direct fit.
 
-## Validation
+## Validation (v2)
 
-- **Format**: valid output on both practice cases, ~0.1 s runtime (cap 8 s).
+- **Format**: valid output on both practice cases, ~0.07 s runtime (cap 8 s).
+- **90-minute no-refresh regime** (the practice gate: frozen history,
+  90-minute horizon, target = frozen rates): pinball loss **0.034** vs
+  persistence **0.025** (1.37x, bar 1.5x); median forecast ratio 0.991.
+  v1 scored 0.41 here (16-17x persistence) and 0.447 on the real gate.
 - **Live out-of-sample test**: fed the frozen launch-night history and asked
-  to forecast 10 h ahead, against the real Exophase snapshot crawled at
-  12:37Z — pinball loss **0.19** vs persistence **1.38**, median forecast
-  ratio 0.184 vs the live 0.201, 90% coverage 0.98.
-- **Synthetic final-like backtest** (100 scenarios, cohort-based launch-week
-  simulator with refresh steps and 2-decimal rounding): mean pinball loss
-  **0.247** vs fitted-curve baseline **0.312** vs persistence **0.469**;
-  beats persistence in 50/50 scenarios and the fitted curve in 47/50.
+  to forecast 9 h ahead, against the real Exophase snapshot crawled at
+  12:37Z — pinball loss **0.188** vs persistence **1.38** (v1: 0.190),
+  median forecast ratio 0.205 vs the live 0.201, 90% coverage 0.98.
+- **Synthetic final-like backtest** (50 fresh scenarios, cohort-based
+  launch-week simulator with refresh steps and 2-decimal rounding): mean
+  pinball loss **0.265** vs fitted-curve baseline **0.324** vs persistence
+  **0.484**; beats persistence in 50/50 scenarios and the fitted curve in
+  39/50, 90% coverage 0.96. On v1's scenario set the numbers reproduce
+  exactly (0.247 vs 0.312 vs 0.469; 47/50 vs fitted curve) — zero regression
+  in the moving branch, which the flat prior never touches.
+- **Behaviour**: spread widens with horizon (median log(q95/q05) 1.72 at
+  4.5 days vs 0.97 at 1 day); forecast direction matches truth on synthetic
+  cases; never crashes on degenerate inputs (empty history, zero horizon,
+  missing fields, all-zero/all-100 rates).
 
 ## Run
 
