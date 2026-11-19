@@ -60,9 +60,34 @@ a 2-decimal rounding term — tight (0.06–0.12) because the inversion pins
 the targets well, unlike v1's 0.82-wide intervals that over-covered at
 0.982.
 
-## Validation (v3)
+v4 changes only the moving branch (the flat branch is byte-identical to
+v3), with two fixes from REAL moving data — a fresh Exophase crawl at
+14:50Z, ~2.2 h after the 12:37Z snapshot, showing players up ~3–4x in
+2.2 h and the median rate down to 0.30x. First, the players trend is no
+longer fit from two snapshots: two points are one jump, not a trend, and
+extrapolating the launch burst as a trend scored 0.726 on the real
+04:30Z → 12:37Z interval against 0.076 for persistence (the earners and
+direct-rate fits already required ≥ 3 points; the players fit now matches
+them). Second, the refresh-jump spread cap rises from 0.3 to 0.8: the
+jumps actually seen in real histories are ~1.6 logit (75th percentile),
+so the old cap held the spread at ~0.4 while the real moves were ~1.0
+logit, and coverage on the real intervals was 0.00–0.22.
 
-- **Inversion fit** (the core of v3): the best-fit target family
+## Validation (v4)
+
+- **Real moving-data tests (v4, the headline change)**: three genuine
+  out-of-sample intervals built from the practice history + the inverted
+  04:30Z targets + the 12:37Z and 14:50Z live crawls. v4's mean pinball
+  loss is **0.442** vs v3's **0.772** (−43%): T1 [frozen, 04:30Z, 12:37Z]
+  → 14:50Z is **0.566** (v3: 0.735, coverage 1.00 vs 0.22); T2 [frozen,
+  04:30Z] → 12:37Z is **0.168** (v3: 0.726, coverage 0.98 vs 0.00 —
+  the burst-extrapolation failure, fixed by the ≥ 3-point players rule);
+  T3 [frozen, 12:37Z] → 14:50Z is **0.592** (v3: 0.854, coverage 0.73
+  vs 0.15). The remaining error is dominated by the unpredictable surge
+  timing (players ~3–4x in 2.2 h is invisible in any trend), not by the
+  model: the fast trophies' earners trends are captured well (median
+  logit error −0.19, coverage 1.00 on T1).
+- **Inversion fit** (v3, unchanged by v4): the best-fit target family
   (a00=5.561, a01=7.036, m01=6.5282, m00=6.0627 exact) reproduces the
   server's six observed numbers essentially exactly — v1 loss 0.447186
   (observed 0.447186), v2 loss 1.472558 (observed 1.472558), typical
@@ -93,7 +118,11 @@ the targets well, unlike v1's 0.82-wide intervals that over-covered at
   **0.484**; beats persistence in 50/50 scenarios and the fitted curve in
   39/50, 90% coverage 0.96. On v1's scenario set the numbers reproduce
   exactly (0.247 vs 0.312 vs 0.469; 47/50 vs fitted curve) — zero regression
-  in the moving branch, which the flat prior never touches.
+  in the moving branch, which the flat prior never touches. **v4 reproduces
+  both synthetic numbers exactly (0.2645 and 0.2467, same win rates)**:
+  neither v4 change triggers on smooth synthetic histories (their fit
+  windows hold 5–7 snapshots, never < 3, and their jumps are small), so the
+  final-regime backtest is unchanged while the real-data tests improve.
 - **Behaviour**: spread widens with horizon (median log(q95/q05) 1.72 at
   4.5 days vs 0.97 at 1 day); forecast direction matches truth on synthetic
   cases; never crashes on degenerate inputs (empty history, zero/30-day/

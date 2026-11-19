@@ -64,6 +64,22 @@ fastest trophy) plus a family-error allowance and a 2-decimal rounding term
 -- tight (0.06-0.12) because the inversion pins the targets well, unlike
 v1's 0.82-wide intervals that over-covered at 0.982.
 
+v4 (moving branch only; the flat branch is byte-identical to v3): two
+fixes from REAL moving data -- a fresh Exophase crawl at 14:50Z, ~2.2 h
+after the 12:37Z snapshot, showing players up ~3-4x in 2.2 h and the
+median rate down to 0.30x. First, the players trend is no longer fit
+from two snapshots: two points are one jump, not a trend, and
+extrapolating the launch burst as a trend scored 0.726 on the real
+04:30Z -> 12:37Z interval against 0.076 for persistence. Second, the
+refresh-jump spread cap rises from 0.3 to 0.8: the jumps actually seen
+in real histories are ~1.6 logit (75th percentile), so the old cap held
+the spread at ~0.4 while the real moves were ~1.0 logit, and coverage
+on the real intervals was 0.00-0.22. On the three real moving intervals
+the loss falls from 0.772 to 0.442 (T1 0.566, T2 0.168, T3 0.592) with
+coverage 0.73-1.00, and the synthetic final-like backtest is unchanged
+(0.2645 on 50 fresh scenarios) because neither change triggers on
+smooth synthetic histories.
+
 Spread: in the moving branch, a per-trophy logit spread combining the
 earners-fit residual, the players-fit residual, a random-walk term growing
 with sqrt(horizon), a refresh-jump term from the jumps actually seen in the
@@ -95,6 +111,10 @@ Z = [-1.645, -0.674, 0.0, 0.674, 1.645]
 RW_SIGMA = 0.25            # random-walk logit sigma per sqrt(day)
 SPREAD_FLOOR = 0.30        # minimum per-trophy logit spread
 SPREAD_CAP = 2.5           # maximum per-trophy logit spread
+REFRESH_SPREAD_CAP = 0.8   # cap on the refresh-jump spread term (v4: was
+                           # 0.3; the jumps actually seen in real histories
+                           # are ~1.6 logit at the 75th percentile, so 0.3
+                           # held the spread far below the real moves)
 SHRINK_K = 3.0             # tier-shrinkage strength for earners slopes
 FIT_WINDOW_HOURS = 24.0    # fits use only the most recent reads
 MIN_FIT_POINTS = 3         # points needed for a trend fit, else persistence/prior
@@ -404,6 +424,14 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
         _a, play_b, play_resid = wls(
             win_x, [math.log(p) for _, p, _ in win])
         play_b = min(max(play_b, 0.0), 2.0)
+        if len(win) < 3:
+            # v4: two snapshots are one jump, not a trend. Extrapolating
+            # a single jump as a players trend is catastrophic when the
+            # jump was a one-off burst (real test on 04:30Z -> 12:37Z:
+            # loss 0.726 vs 0.076 for persistence). The earners and
+            # direct-rate fits already require >= 3 points; the players
+            # fit now matches them.
+            play_b = 0.0
         mult = math.exp(play_b * damp(dx_target, damp_tau))
         players_target = last_players * min(mult, PLAYERS_GROWTH_CAP)
 
@@ -490,7 +518,7 @@ def forecast_case(case, damp_tau=DAMP_TAU_X, blend_decomp=BLEND_DECOMP,
     jumps.sort()
     if jumps:
         jump_scale = jumps[int(0.75 * (len(jumps) - 1))]
-        refresh_spread = min(0.5 * jump_scale, 0.3)
+        refresh_spread = min(0.5 * jump_scale, REFRESH_SPREAD_CAP)
     else:
         # flat history: no refresh seen yet. The flat branch carries its
         # own inversion-based spread, so the generic jump term is zero
